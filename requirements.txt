@@ -1,0 +1,7 @@
+Flask>=3.0
+pandas>=2.0
+python-dotenv>=1.0
+google-genai>=1.0
+openpyxl>=3.1
+cryptography
+reportlab>=4.0

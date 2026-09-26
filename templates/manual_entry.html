@@ -1,0 +1,38 @@
+<section class="card manual-card" id="manual-entry" aria-labelledby="manualHeading">
+    <div class="section-number">02</div><h2 id="manualHeading">Одна компания — подробнее</h2>
+    <p>Укажите выручку и налоговую долю за один и тот же период. Поля со звёздочкой обязательны.</p>
+    <form id="manualEntryForm" novalidate>
+        <div class="manual-fields">
+            <label>Название компании *
+                <input name="name" type="text" required placeholder="Например, ООО «Пример»">
+            </label>
+            <label>Доход / выручка *
+                <input name="revenue" type="number" min="0" step="any" required>
+            </label>
+            <label>Налог, % *
+                <input name="tax_percent" type="number" min="0" max="100" step="any" required>
+            </label>
+            <label>Количество сотрудников *
+                <input name="employees" type="number" min="0" max="9007199254740991" step="1" required>
+            </label>
+            <label>Активность в соцсетях
+                <textarea name="social_media" rows="4"
+                          placeholder="Например: В наличии новые товары, доставка, скидка при заказе"></textarea>
+            </label>
+            <label>Регион (необязательно)
+                <input name="region" type="text" placeholder="Например, Ташкент">
+            </label>
+            <label>Телефон (необязательно)
+                <input name="phone" type="tel" placeholder="Например, +998901234567">
+            </label>
+            <label>Отрасль (необязательно)
+                <input name="sector" type="text" placeholder="Например, торговля">
+            </label>
+        </div>
+        <p>Оценка демонстрационная: пороги не учитывают отрасль и налоговый режим.</p>
+        <p>Торговые слова в соцсетях при выручке до 1 000 включительно добавляют 15 баллов.
+            Это демонстрационный порог в единицах введённой выручки.</p>
+        <button id="manualEntryButton" type="submit">Сохранить и проанализировать</button>
+        <div id="manualEntryStatus" class="loading" role="status" aria-live="polite"></div>
+    </form>
+</section>

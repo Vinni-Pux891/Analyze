@@ -1,0 +1,127 @@
+{% extends 'base.html' %}
+{% block title %}Главная{% endblock %}
+{% block head %}<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>{% endblock %}
+{% block content %}
+    <section class="hero">
+        <span class="page-index">Рабочее пространство аналитика</span>
+        <h1>Мониторинг<br>неформальной экономики</h1>
+        <p>От исходных данных к объяснимым сигналам: загрузите таблицу или добавьте сведения о компании вручную.</p>
+    </section>
+
+    <section class="card upload" aria-labelledby="uploadHeading">
+        <div class="section-number">01</div><h2 id="uploadHeading">Начните с данных</h2>
+        <p>CSV, XLSX или XLS. Для демо можно использовать любой обезличенный набор данных.</p>
+        <label class="file-label" for="fileInput">Таблица для анализа</label>
+        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls">
+        <button id="analyzeButton" onclick="analyzeData()">Проанализировать файл</button>
+        <div id="loading" class="loading hidden">Обработка данных...</div>
+    </section>
+
+    {% include 'manual_entry.html' %}
+
+    <section class="card" aria-labelledby="regionsHeading">
+        <div class="section-head">
+            <h2 id="regionsHeading">Карта риска по регионам</h2>
+            <button class="secondary" id="refreshRegionsButton" type="button">Обновить</button>
+        </div>
+        <p>Средняя оценка риска: бирюзовый — ниже 30, синий — от 30 до 71 (не включая 71), фиолетовый — от 71.
+            Записи без оценки не входят в среднее. Высокий риск — от 71 балла.</p>
+        <div id="regionsStatus" role="status" aria-live="polite">Загрузка сводки...</div>
+        <div class="regions-scroll">
+            <div id="regionsChartContainer" class="hidden" style="position: relative; height: 240px;">
+                <canvas id="regionsChart" role="img" aria-label="Средняя оценка риска по регионам"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <section class="card" aria-labelledby="graphHeading">
+        <div class="section-head">
+            <h2 id="graphHeading">Граф связей</h2>
+            <button class="secondary" id="refreshGraphButton" type="button">Обновить</button>
+        </div>
+        <p>Сплошная линия — одинаковый телефон, пунктир — одинаковое значение соцсетей.
+            Совпадение не доказывает, что записи относятся к одной компании.
+            Значения «низкая», «средняя», «высокая» также участвуют в сравнении.</p>
+        <p>Цвет узла: бирюзовый — ниже 30, синий — от 30 до 71 (не включая 71),
+            фиолетовый — от 71, серо-бирюзовый — оценка отсутствует.</p>
+        <div id="graphStatus" role="status" aria-live="polite">Загрузка связей...</div>
+        <svg id="companyGraph" class="hidden" viewBox="0 0 900 460"
+             aria-label="Граф связей компаний"></svg>
+        <div id="graphDetails" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="dashboard" class="hidden">
+        <div id="reportDownload" class="card hidden">
+            <label for="reportFormat">Скачать отчёт</label>
+            <select id="reportFormat">
+                <option value="pdf">PDF</option>
+                <option value="xlsx">Excel (.xlsx)</option>
+                <option value="csv">CSV</option>
+            </select>
+            <button id="downloadReportButton" type="button">Скачать</button>
+            <div id="downloadReportStatus" role="status" aria-live="polite"></div>
+        </div>
+        <div class="section-head">
+            <h2>Аналитическая панель</h2>
+            <span class="tag">Результаты</span>
+        </div>
+
+        <div class="metrics">
+            <div class="metric"><small>Записей</small><strong id="rows">0</strong></div>
+            <div class="metric"><small>Столбцов</small><strong id="columns">0</strong></div>
+            <div class="metric"><small>Пропуски</small><strong id="missing">0</strong></div>
+            <div class="metric"><small>Дубликаты</small><strong id="duplicates">0</strong></div>
+            <div class="metric"><small>Оценка риска</small><strong id="riskScore">0</strong><em>/100</em></div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="section-head">
+                    <h3>Аномалии</h3>
+                    <span class="tag warning">Проверка</span>
+                </div>
+                <p id="analysisNote"></p>
+                <div id="anomalies"></div>
+            </div>
+
+            <div class="card">
+                <h3>Распределение риска</h3>
+                <canvas id="riskChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Статистика числовых показателей</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Показатель</th>
+                            <th>Среднее</th>
+                            <th>Медиана</th>
+                            <th>Минимум</th>
+                            <th>Максимум</th>
+                            <th>Сумма</th>
+                        </tr>
+                    </thead>
+                    <tbody id="statistics"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card ai-card">
+            <div class="section-head">
+                <h3>Аналитическое заключение</h3>
+                <span class="tag ai">Отчёт</span>
+            </div>
+            <div id="aiReport" class="report">Ожидание...</div>
+        </div>
+
+        <div class="notice">
+            <strong>Важно:</strong>
+            статистическая аномалия не является доказательством незаконной деятельности.
+            Результаты системы предназначены для аналитической проверки.
+        </div>
+    </section>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}
