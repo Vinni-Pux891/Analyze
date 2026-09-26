@@ -18,7 +18,7 @@ def commerce_metadata(text, revenue) -> dict:
         amount = float(revenue)
     except (TypeError, ValueError, OverflowError):
         amount = math.nan
-    low_revenue = not math.isfinite(amount) or amount <= LOW_REVENUE_THRESHOLD
+    low_revenue = math.isfinite(amount) and 0 <= amount <= LOW_REVENUE_THRESHOLD
     return {"commerce_signal": bool(keywords) and low_revenue, "commerce_keywords": keywords}
 
 

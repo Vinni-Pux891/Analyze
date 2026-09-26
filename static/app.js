@@ -2,6 +2,8 @@ let riskChart = null;
 let currentCompanyId = null;
 let graphRequest = 0;
 let graphFrame = null;
+let riskBands = window.riskBands;
+let batchResults = [];
 
 document.getElementById("refreshGraphButton").addEventListener("click", loadCompanyGraph);
 
@@ -27,6 +29,7 @@ async function loadCompanyGraph() {
 }
 
 function renderCompanyGraph(graph) {
+    riskBands = graph.risk_bands || riskBands;
     cancelAnimationFrame(graphFrame);
     const svg = document.getElementById("companyGraph");
     const status = document.getElementById("graphStatus");
@@ -64,8 +67,8 @@ function renderCompanyGraph(graph) {
         const known = typeof score === "number" && Number.isFinite(score);
         const description = `${name}. Оценка риска: ${known ? `${score}/100` : "не указана"}`;
         node.element = element("g", { role: "button", tabindex: 0, "aria-label": description });
-        element("circle", { r: 18, fill: !known ? "#788985" : score < 30 ? "#0f828c"
-            : score < 71 ? "#065084" : "#320A6B" }, node.element);
+        element("circle", { r: 18, fill: !known ? "#788985" : score < riskBands.medium ? "#0f828c"
+            : score < riskBands.high ? "#065084" : "#320A6B" }, node.element);
         element("title", {}, node.element).textContent = description;
         element("text", { y: 34, "text-anchor": "middle", fill: "#162d35", "font-size": 12 }, node.element)
             .textContent = name.length > 22 ? name.slice(0, 21) + "…" : name;
@@ -132,6 +135,7 @@ async function loadRegionsSummary() {
             status.textContent = result.error || "Не удалось загрузить сводку по регионам.";
             return;
         }
+        riskBands = result.risk_bands || riskBands;
         renderRegionsChart(result.regions);
     } catch (error) {
         if (requestId === regionsRequest) {
@@ -162,8 +166,8 @@ function renderRegionsChart(regions) {
                 label: "Средняя оценка риска",
                 data: regions.map(item => item.average_risk_score),
                 backgroundColor: regions.map(item => item.average_risk_score === null ? "#788985"
-                    : item.average_risk_score < 30 ? "#0f828c"
-                    : item.average_risk_score < 71 ? "#065084" : "#320A6B"),
+                    : item.average_risk_score < riskBands.medium ? "#0f828c"
+                    : item.average_risk_score < riskBands.high ? "#065084" : "#320A6B"),
                 borderRadius: 5,
             }],
         },
@@ -253,6 +257,7 @@ async function submitManualEntry(event) {
             status.textContent = result.error || "Не удалось сохранить компанию.";
             return;
         }
+        document.getElementById("batchResults").classList.add("hidden");
         renderDashboard(result.analysis, result.ai_report, result.company?.id);
         status.textContent = `Компания «${result.company.name}» сохранена. Номер записи: ${result.company.id}.`;
     } catch (error) {
@@ -290,7 +295,27 @@ async function analyzeData() {
             throw new Error(result.error || "Ошибка анализа");
         }
 
-        renderDashboard(result.analysis, result.ai_report, result.company?.id);
+        batchResults = result.results;
+        const quality = result.dataset_analysis;
+        document.getElementById("batchResults").classList.remove("hidden");
+        document.getElementById("datasetQuality").textContent = `Строк: ${quality.rows}; пропусков: ${quality.missing_values}; дубликатов: ${quality.duplicates}. Эти показатели не влияют на риск компаний.`;
+        const diagnostics = document.getElementById("datasetAnomalies");
+        diagnostics.replaceChildren();
+        for (const signal of quality.anomalies) {
+            const li = document.createElement("li");
+            li.textContent = `${signal.column}: ${signal.count} (${signal.threshold})`;
+            diagnostics.appendChild(li);
+        }
+        if (!quality.anomalies.length) diagnostics.textContent = "Отклонений ±3σ не найдено.";
+        const select = document.getElementById("companyResultSelect");
+        select.replaceChildren();
+        batchResults.forEach((item, index) => {
+            const option = document.createElement("option");
+            option.value = index;
+            option.textContent = `Строка ${item.row}: ${item.company.name || "Без названия"} — ${item.analysis.risk_score}/100`;
+            select.appendChild(option);
+        });
+        showBatchCompany();
 
     } catch (error) {
         alert(error.message);
@@ -298,6 +323,12 @@ async function analyzeData() {
         button.disabled = false;
         loading.classList.add("hidden");
     }
+}
+
+document.getElementById("companyResultSelect").addEventListener("change", showBatchCompany);
+function showBatchCompany() {
+    const item = batchResults[Number(document.getElementById("companyResultSelect").value)];
+    if (item) renderDashboard(item.analysis, item.ai_report, item.company.id);
 }
 
 function renderDashboard(data, report, companyId = null) {
@@ -411,11 +442,11 @@ function renderStatistics(statistics) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
             <td>${escapeHtml(name)}</td>
-            <td>${value.mean}</td>
-            <td>${value.median}</td>
-            <td>${value.min}</td>
-            <td>${value.max}</td>
-            <td>${value.sum}</td>
+            <td>${value.mean ?? "—"}</td>
+            <td>${value.median ?? "—"}</td>
+            <td>${value.min ?? "—"}</td>
+            <td>${value.max ?? "—"}</td>
+            <td>${value.sum ?? "—"}</td>
         `;
         tbody.appendChild(tr);
     });

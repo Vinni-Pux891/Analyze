@@ -49,7 +49,7 @@ class ReportTests(unittest.TestCase):
         )
         self.report = {
             "company_name": "Компания", "revenue": 1000,
-            "employees": 0, "social_media": "высокая", "score": 50,
+            "employees": 0, "social_media": "высокая", "score": 77,
             "recommendation": {"needs_inspection": True, "reason": "Нужна сверка показателей."},
         }
 
@@ -113,8 +113,8 @@ class ReportTests(unittest.TestCase):
 
     def test_uploads_use_normalized_input(self):
         for csv, expected in (
-            ("name,revenue,employees,social_media\nКомпания,1000,0,высокая\n", "Компания"),
-            ("name,revenue\nПервая,1000\nВторая,2000\n", None),
+            ("name,revenue,tax_percent,employees,social_media\nКомпания,1000,0.5,0,высокая\n", "Компания"),
+            ("name,revenue,tax_percent,employees\nПервая,1000,5,1\nВторая,2000,5,2\n", "Вторая"),
         ):
             with self.subTest(csv=csv), patch.object(self.module, "generate_ai_report", return_value=self.report) as generate:
                 response = self.module.app.test_client().post("/api/analyze", data={
@@ -158,21 +158,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(detect_commerce_signals("ЦЕНА, заказ, ЗАКАЗ; доставка; в наличии"),
                          ["цена", "заказ", "доставка", "в наличии"])
         self.assertEqual(detect_commerce_signals("высокая"), [])
-        for revenue in (0, None, "", 999, 1000):
+        for revenue in (0, 999, 1000):
             self.assertTrue(commerce_metadata("Доставка", revenue)["commerce_signal"])
+        for missing in (None, "", float("nan"), float("inf")):
+            self.assertFalse(commerce_metadata("Доставка", missing)["commerce_signal"])
         self.assertFalse(commerce_metadata("Доставка", 1001)["commerce_signal"])
         self.assertFalse(commerce_metadata("", 0)["commerce_signal"])
 
     def test_manual_commerce_persistence_and_report(self):
         company = {**self.company, "social_media": "Скидка, доставка, заказ"}
-        baseline = self.module.analyze_company(self.company)["risk_score"]
         with patch.object(self.module, "client", None):
             response = self.module.app.test_client().post("/api/manual-entry", json=company)
         self.assertEqual(response.status_code, 200)
         result = response.json
         self.assertTrue(result["company"]["commerce_signal"])
         self.assertEqual(result["company"]["commerce_keywords"], ["заказ", "доставка", "скидка"])
-        self.assertEqual(result["risk_score"], baseline + 15)
+        self.assertEqual(result["risk_score"], 100)
+        self.assertEqual(result["analysis"]["raw_score"], 65)
         self.assertIn("Обнаружены признаки торговой активности", result["ai_report"]["recommendation"]["reason"])
         analysis = self.module.analyze_company(company)
         data = self.module.normalize_report_input(analysis, company)
@@ -184,16 +186,14 @@ class ReportTests(unittest.TestCase):
     def test_upload_commerce_matches_each_rows_revenue(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "commerce.csv"
-            path.write_text("social_media,revenue\nДоставка,1001\nПривет,0\n", encoding="utf-8")
-            self.assertFalse(self.module.analyze_data(path.as_posix())["commerce_signal"])
-            path.write_text("social_media,revenue\nДоставка,\nЗаказ,1000\n", encoding="utf-8")
+            path.write_text("social_media,revenue,tax_percent,employees\nДоставка,1001,5,1\nЗаказ,1000,5,1\n", encoding="utf-8")
             result = self.module.analyze_data(path.as_posix())
-            self.assertTrue(result["commerce_signal"])
-            self.assertEqual(result["commerce_keywords"], ["заказ", "доставка"])
-            self.assertEqual(len(result["commerce_rows"]), 2)
-            self.assertEqual(result["risk_score"], 35)
-            path.write_text("social_media\nДоставка\n", encoding="utf-8")
-            self.assertTrue(self.module.analyze_data(path.as_posix())["commerce_signal"])
+            self.assertIsNone(result["risk_score"])
+            self.assertFalse(result["records"][0]["analysis"]["commerce_signal"])
+            self.assertEqual(result["records"][1]["analysis"]["risk_score"], 23)
+            path.write_text("social_media,revenue\nДоставка,\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Строка 2"):
+                self.module.analyze_data(path.as_posix())
 
     def test_phone_migration(self):
         with TemporaryDirectory() as directory, patch.object(self.database, "DB_PATH", Path(directory) / "legacy.db"):
@@ -205,6 +205,104 @@ class ReportTests(unittest.TestCase):
             with sqlite3.connect(self.database.DB_PATH) as connection:
                 self.assertEqual(connection.execute("SELECT name, phone FROM companies").fetchone(), ("сохранено", None))
                 self.assertEqual([r[1] for r in connection.execute("PRAGMA table_info(companies)")].count("phone"), 1)
+
+    def test_same_company_manual_csv_and_excel(self):
+        from openpyxl import Workbook
+        company = {**self.company, "phone": "+998001234567", "region": "Tashkent"}
+        csv_text = "name,revenue,tax_paid,employees,social_media,phone,region\nКомпания,1000,5,0,высокая,+998001234567,Tashkent\n"
+        workbook = Workbook()
+        for row in csv.reader(io.StringIO(csv_text)):
+            workbook.active.append(row)
+        excel = io.BytesIO()
+        workbook.save(excel)
+        client = self.module.app.test_client()
+        with patch.object(self.module, "client", None):
+            manual = client.post("/api/manual-entry", json=company).json
+            for extension, payload in (("csv", csv_text.encode()), ("xlsx", excel.getvalue())):
+                response = client.post("/api/analyze", data={"file": (io.BytesIO(payload), "input." + extension)})
+                self.assertEqual(response.status_code, 200, response.json)
+                result = response.json
+                self.assertEqual(result["analysis"], manual["analysis"])
+                self.assertEqual(result["analysis"]["risk_score"], 77)
+                self.assertEqual(result["analysis"]["risk_tier"], "high")
+                saved = self.database.get_company(result["company"]["id"])
+                self.assertEqual(saved["phone"], company["phone"])
+                self.assertEqual(saved["tax_percent"], 0.5)
+                self.assertEqual(saved["scoring_version"], self.module.SCORING_VERSION)
+
+    def test_batch_quality_does_not_change_individual_scores(self):
+        content = "name,revenue,tax_paid,employees,region\nA,1000,5,0,\nA,1000,5,0,\nB,1000000,50000,100,Tashkent\n"
+        before = len(self.database.get_all_companies())
+        with patch.object(self.module, "client", None):
+            response = self.module.app.test_client().post("/api/analyze", data={"file": (io.BytesIO(content.encode()), "batch.csv")})
+        self.assertEqual(response.status_code, 200)
+        result = response.json
+        self.assertIsNone(result["analysis"]["risk_score"])
+        self.assertIsNone(result["company"])
+        self.assertEqual(result["dataset_analysis"]["duplicates"], 1)
+        self.assertEqual(result["dataset_analysis"]["missing_values"], 2)
+        self.assertEqual([item["analysis"]["risk_score"] for item in result["results"]], [77, 77, 0])
+        self.assertEqual(len(self.database.get_all_companies()), before + 3)
+        for item in result["results"]:
+            saved = self.database.get_company(item["company"]["id"])
+            self.assertEqual(saved["risk_score"], item["analysis"]["risk_score"])
+
+    def test_invalid_batch_never_saves_partial_records(self):
+        before = len(self.database.get_all_companies())
+        client = self.module.app.test_client()
+        for row in ("B,inf,5,0", "B,-1,5,0", "B,1000,5,0.5", "B,1000,,0", "B,,5,0"):
+            content = "name,revenue,tax_percent,employees\nA,1000,0.5,0\n" + row + "\n"
+            with self.subTest(row=row), patch.object(self.module, "generate_ai_report") as generate:
+                response = client.post("/api/analyze", data={"file": (io.BytesIO(content.encode()), "invalid.csv")})
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("Строка 3", response.json["error"])
+                generate.assert_not_called()
+                self.assertEqual(len(self.database.get_all_companies()), before)
+
+    def test_scoring_boundaries_and_missing_revenue(self):
+        from scoring import analyze_company, normalize_company, risk_tier
+        for tax, raw in ((0.99, 30), (1, 15), (2.99, 15), (3, 0)):
+            self.assertEqual(analyze_company({**self.company, "employees": 1, "tax_percent": tax})["raw_score"], raw)
+        for score, tier in ((0, "low"), (29, "low"), (30, "medium"), (70, "medium"), (71, "high"), (100, "high")):
+            self.assertEqual(risk_tier(score), tier)
+        maximum = analyze_company({**self.company, "social_media": "доставка"})
+        self.assertEqual((maximum["raw_score"], maximum["risk_score"]), (65, 100))
+        zero = analyze_company({**self.company, "revenue": 0, "tax_percent": None, "employees": 2, "social_media": "ВЫСОКАЯ"})
+        self.assertEqual(zero["raw_score"], 32)
+        with self.assertRaises(ValueError):
+            normalize_company({**self.company, "tax_paid": 500})
+        with self.assertRaises(ValueError):
+            analyze_company({**self.company, "revenue": None})
+
+    def test_legacy_scores_excluded_from_summary(self):
+        companies = [
+            {"region": "Tashkent", "risk_score": 100, "scoring_version": None},
+            {"region": "Tashkent", "risk_score": 0, "scoring_version": self.module.SCORING_VERSION},
+        ]
+        with patch.object(self.module, "get_all_companies", return_value=companies):
+            region = self.module.app.test_client().get("/api/regions/summary").json["regions"][0]
+        self.assertEqual(region["company_count"], 1)
+        self.assertEqual(region["average_risk_score"], 0)
+
+    def test_sample_file_and_home_page(self):
+        result = self.module.analyze_data(str(Path(__file__).resolve().parents[1] / "sample_data.csv"))
+        self.assertEqual(len(result["records"]), 11)
+        for record in result["records"]:
+            self.assertEqual(record["analysis"]["risk_score"], 0)
+            self.assertIsNotNone(record["company"]["tax_percent"])
+        response = self.module.app.test_client().get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="companyResultSelect"', response.get_data(as_text=True))
+        self.assertIn('window.riskBands =', response.get_data(as_text=True))
+
+    def test_batch_insert_rolls_back_on_failure(self):
+        before = len(self.database.get_all_companies())
+        with self.assertRaises(ValueError):
+            self.database.insert_companies([
+                {**self.company, "source": "upload"},
+                {**self.company, "source": "invalid"},
+            ])
+        self.assertEqual(len(self.database.get_all_companies()), before)
 
     def test_encrypted_links_and_graph(self):
         with TemporaryDirectory() as directory, patch.object(self.database, "DB_PATH", Path(directory) / "links.db"):
@@ -235,7 +333,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result.json["company"]["phone"], "+998 90")
         self.assertEqual(client.post("/api/manual-entry", json={**self.company, "phone": 123}).status_code, 400)
         with patch.object(self.module, "find_linked_companies", return_value=[]):
-            self.assertEqual(client.get("/api/graph").json, {"nodes": [], "edges": []})
+            self.assertEqual(client.get("/api/graph").json, {"nodes": [], "edges": [], "risk_bands": self.module.RISK_BANDS})
         with patch.object(self.module, "find_linked_companies", side_effect=ValueError("Секрет")):
             self.assertEqual(client.get("/api/graph").status_code, 500)
 
@@ -249,6 +347,7 @@ class ReportTests(unittest.TestCase):
             {"region": "  ", "risk_score": None},
             {"region": "Бухара", "risk_score": None},
         ]
+        companies = [{**item, "scoring_version": self.module.SCORING_VERSION} for item in companies]
         with patch.object(self.module, "get_all_companies", return_value=companies):
             response = self.module.app.test_client().get("/api/regions/summary")
         self.assertEqual(response.status_code, 200)
@@ -279,7 +378,7 @@ class ReportTests(unittest.TestCase):
         with patch.object(self.module, "generate_ai_report", return_value=self.report):
             manual = client.post("/api/manual-entry", json=self.company)
             uploaded = client.post("/api/analyze", data={"file": (
-                io.BytesIO("name,revenue,employees,social_media\nКомпания,1000,0,высокая\n".encode()), "sample.csv",
+                io.BytesIO("name,revenue,tax_percent,employees,social_media\nКомпания,1000,0.5,0,высокая\n".encode()), "sample.csv",
             )})
         for result in (manual, uploaded):
             self.assertEqual(result.status_code, 200)

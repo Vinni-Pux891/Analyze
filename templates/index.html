@@ -10,7 +10,7 @@
 
     <section class="card upload" aria-labelledby="uploadHeading">
         <div class="section-number">01</div><h2 id="uploadHeading">Начните с данных</h2>
-        <p>CSV, XLSX или XLS. Для демо можно использовать любой обезличенный набор данных.</p>
+        <p>CSV, XLSX или XLS. Каждая строка — одна компания за один период. Обязательны revenue, employees и tax_percent либо tax_paid (при положительной выручке). Налог и выручка должны быть за один период и в одной валюте.</p>
         <label class="file-label" for="fileInput">Таблица для анализа</label>
         <input id="fileInput" type="file" accept=".csv,.xlsx,.xls">
         <button id="analyzeButton" onclick="analyzeData()">Проанализировать файл</button>
@@ -24,8 +24,8 @@
             <h2 id="regionsHeading">Карта риска по регионам</h2>
             <button class="secondary" id="refreshRegionsButton" type="button">Обновить</button>
         </div>
-        <p>Средняя оценка риска: бирюзовый — ниже 30, синий — от 30 до 71 (не включая 71), фиолетовый — от 71.
-            Записи без оценки не входят в среднее. Высокий риск — от 71 балла.</p>
+        <p>Средняя оценка риска: бирюзовый — ниже {{ risk_bands.medium }}, синий — от {{ risk_bands.medium }} до {{ risk_bands.high }} (не включая {{ risk_bands.high }}), фиолетовый — от {{ risk_bands.high }}.
+            В сводку входят только оценки по единой методике v2. Старые оценки исключены; повторно загрузите исходные данные для пересчёта. Высокий риск — от {{ risk_bands.high }} балла.</p>
         <div id="regionsStatus" role="status" aria-live="polite">Загрузка сводки...</div>
         <div class="regions-scroll">
             <div id="regionsChartContainer" class="hidden" style="position: relative; height: 240px;">
@@ -42,8 +42,8 @@
         <p>Сплошная линия — одинаковый телефон, пунктир — одинаковое значение соцсетей.
             Совпадение не доказывает, что записи относятся к одной компании.
             Значения «низкая», «средняя», «высокая» также участвуют в сравнении.</p>
-        <p>Цвет узла: бирюзовый — ниже 30, синий — от 30 до 71 (не включая 71),
-            фиолетовый — от 71, серо-бирюзовый — оценка отсутствует.</p>
+        <p>Цвет узла: бирюзовый — ниже {{ risk_bands.medium }}, синий — от {{ risk_bands.medium }} до {{ risk_bands.high }} (не включая {{ risk_bands.high }}),
+            фиолетовый — от {{ risk_bands.high }}, серо-бирюзовый — оценка отсутствует.</p>
         <div id="graphStatus" role="status" aria-live="polite">Загрузка связей...</div>
         <svg id="companyGraph" class="hidden" viewBox="0 0 900 460"
              aria-label="Граф связей компаний"></svg>
@@ -51,6 +51,13 @@
     </section>
 
     <section id="dashboard" class="hidden">
+        <div id="batchResults" class="card hidden">
+            <h3>Результаты по компаниям</h3>
+            <p id="datasetQuality"></p>
+            <details><summary>Статистические отклонения таблицы (не влияют на риск)</summary><ul id="datasetAnomalies"></ul></details>
+            <label for="companyResultSelect">Выберите запись для просмотра и скачивания отчёта</label>
+            <select id="companyResultSelect"></select>
+        </div>
         <div id="reportDownload" class="card hidden">
             <label for="reportFormat">Скачать отчёт</label>
             <select id="reportFormat">
@@ -77,7 +84,7 @@
         <div class="grid">
             <div class="card">
                 <div class="section-head">
-                    <h3>Аномалии</h3>
+                    <h3>Сигналы компании</h3>
                     <span class="tag warning">Проверка</span>
                 </div>
                 <p id="analysisNote"></p>
@@ -124,4 +131,4 @@
         </div>
     </section>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}
+{% block scripts %}<script>window.riskBands = {{ risk_bands | tojson }};</script><script src="{{ url_for('static', filename='app.js') }}"></script>{% endblock %}

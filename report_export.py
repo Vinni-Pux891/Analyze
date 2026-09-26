@@ -42,7 +42,7 @@ def _rows(record):
         ("Активность в социальных сетях", record.get("social_media")),
         ("Оценка риска", f"{score}/100" if score is not None else None),
         ("Рекомендация", f"Проверка нужна: {answer}. {reason}"),
-        ("Примечание", DISCLAIMER),
+        ("Примечание", DISCLAIMER + (f". Методика: {record['scoring_version']}" if record.get("scoring_version") else "")),
         ("Дата формирования", datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M:%S (UTC)")),
     ]
 

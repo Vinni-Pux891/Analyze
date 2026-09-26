@@ -9,9 +9,10 @@ from flask import Flask, render_template, request, jsonify, send_file
 from dotenv import load_dotenv
 from google import genai
 from database import init_db, insert_company, get_company, get_all_companies, update_company_score
-from database import find_linked_companies
+from database import find_linked_companies, insert_companies
 from report_export import build_pdf, build_xlsx, build_csv
-from commerce_signals import COMMERCE_KEYWORDS, COMMERCE_BONUS, commerce_metadata, commerce_reason
+from commerce_signals import commerce_reason
+from scoring import analyze_company, normalize_company, SCORING_VERSION, RISK_BANDS
 
 load_dotenv()
 
@@ -25,15 +26,30 @@ client = genai.Client(api_key=api_key) if api_key else None
 
 
 def load_dataframe(path):
+    text_columns = {field: "string" for field in ("name", "region", "sector", "social_media", "phone")}
     if path.lower().endswith(".csv"):
-        return pd.read_csv(path)
-    return pd.read_excel(path)
+        return pd.read_csv(path, dtype=text_columns)
+    return pd.read_excel(path, dtype=text_columns)
+
+
+def finite_stat(value):
+    return round(float(value), 2) if math.isfinite(float(value)) else None
 
 
 def analyze_data(path):
     df = load_dataframe(path)
 
     rows, columns = df.shape
+    if rows == 0:
+        raise ValueError("Таблица не содержит записей.")
+    records = []
+    for row_number, row in enumerate(df.to_dict(orient="records"), 2):
+        clean = {key: None if pd.isna(value) else value for key, value in row.items()}
+        try:
+            company = normalize_company(clean)
+        except ValueError as error:
+            raise ValueError(f"Строка {row_number}: {error}") from None
+        records.append({"row": row_number, "company": company, "analysis": analyze_company(company)})
     numeric = df.select_dtypes(include="number").columns.tolist()
 
     missing = int(df.isna().sum().sum())
@@ -41,20 +57,20 @@ def analyze_data(path):
 
     statistics = {}
     for col in numeric:
-        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        s = pd.to_numeric(df[col], errors="coerce").replace([float("inf"), float("-inf")], float("nan")).dropna()
         if len(s) == 0:
             continue
         statistics[col] = {
-            "mean": round(float(s.mean()), 2),
-            "median": round(float(s.median()), 2),
-            "min": round(float(s.min()), 2),
-            "max": round(float(s.max()), 2),
-            "sum": round(float(s.sum()), 2)
+            "mean": finite_stat(s.mean()),
+            "median": finite_stat(s.median()),
+            "min": finite_stat(s.min()),
+            "max": finite_stat(s.max()),
+            "sum": finite_stat(s.sum())
         }
 
     anomalies = []
     for col in numeric:
-        s = pd.to_numeric(df[col], errors="coerce")
+        s = pd.to_numeric(df[col], errors="coerce").replace([float("inf"), float("-inf")], float("nan"))
         mean, std = s.mean(), s.std()
         if pd.isna(std) or std == 0:
             continue
@@ -67,42 +83,13 @@ def analyze_data(path):
                 "threshold": f"±3σ от среднего"
             })
 
-    # Простая демонстрационная оценка риска.
-    # Это НЕ утверждение о незаконной деятельности.
-    risk_score = min(
-        100,
-        int(
-            min(len(anomalies) * 12, 60)
-            + min(duplicates / max(rows, 1) * 20, 20)
-            + min(missing / max(rows * max(columns, 1), 1) * 100, 20)
-        )
-    )
-
-    commerce_rows = []
-    if "social_media" in df.columns:
-        for row_number, (_, row) in enumerate(df.iterrows(), 1):
-            metadata = commerce_metadata(row.get("social_media"), row.get("revenue"))
-            if metadata["commerce_signal"]:
-                commerce_rows.append({"row": row_number, **metadata})
-    commerce_keywords = [keyword for keyword in COMMERCE_KEYWORDS
-                         if any(keyword in row["commerce_keywords"] for row in commerce_rows)]
-    if commerce_rows:
-        risk_score = min(100, risk_score + COMMERCE_BONUS)
-        anomalies.append({"column": "Активность в соцсетях", "count": len(commerce_rows),
-                          "threshold": commerce_reason(commerce_keywords)})
-
     return {
-        "commerce_signal": bool(commerce_rows), "commerce_keywords": commerce_keywords,
-        "commerce_rows": commerce_rows,
-        "rows": rows,
-        "columns": columns,
-        "numeric_columns": numeric,
-        "missing_values": missing,
-        "duplicates": duplicates,
-        "anomalies": anomalies,
-        "statistics": statistics,
-        "risk_score": risk_score,
-        "note": "Risk Score — демонстрационный аналитический индикатор, а не доказательство нарушения."
+        "rows": rows, "columns": columns, "numeric_columns": numeric,
+        "missing_values": missing, "duplicates": duplicates,
+        "anomalies": anomalies, "statistics": statistics,
+        "risk_score": None, "scoring_version": SCORING_VERSION,
+        "note": "Диагностика таблицы: пропуски, дубликаты и ±3σ не входят в оценку риска компаний.",
+        "records": records,
     }
 
 
@@ -484,7 +471,7 @@ Risk Score: 57
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", risk_bands=RISK_BANDS)
 
 
 @app.get("/contacts")
@@ -502,6 +489,8 @@ def regions_summary():
     try:
         groups = {}
         for company in get_all_companies():
+            if company.get("scoring_version") != SCORING_VERSION:
+                continue
             region = " ".join((company.get("region") or "").split()) or "Регион не указан"
             group = groups.setdefault(region.casefold(), {
                 "region": region, "company_count": 0,
@@ -511,13 +500,13 @@ def regions_summary():
             score = company.get("risk_score")
             if type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 100:
                 group["scores"].append(score)
-                group["high_risk_count"] += int(score >= 71)
+                group["high_risk_count"] += int(score >= RISK_BANDS["high"])
         regions = []
         for group in sorted(groups.values(), key=lambda item: item["region"].casefold()):
             scores = group.pop("scores")
             group["average_risk_score"] = round(sum(scores) / len(scores), 2) if scores else None
             regions.append(group)
-        response = jsonify({"success": True, "regions": regions})
+        response = jsonify({"success": True, "regions": regions, "risk_bands": RISK_BANDS})
         response.headers["Cache-Control"] = "no-store"
         return response
     except Exception:
@@ -525,82 +514,7 @@ def regions_summary():
 
 
 def validate_manual_entry(data):
-    if not isinstance(data, dict):
-        raise ValueError("Ожидается объект с данными компании в формате JSON.")
-    company = {}
-    for field, label in (
-        ("name", "Название компании"), ("social_media", "Активность в соцсетях"),
-        ("region", "Регион"), ("sector", "Отрасль"),
-        ("phone", "Телефон"),
-    ):
-        value = data.get(field)
-        if value is not None and not isinstance(value, str):
-            raise ValueError(f"Поле «{label}» должно быть текстом.")
-        company[field] = value.strip() or None if value is not None else None
-    if not company["name"]:
-        raise ValueError("Укажите название компании.")
-    for field, label in (
-        ("revenue", "Доход / выручка"), ("tax_percent", "Налог, %"),
-        ("employees", "Количество сотрудников"),
-    ):
-        value = data.get(field)
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-            raise ValueError(f"Поле «{label}» обязательно и должно быть числом.")
-        try:
-            number = float(value)
-        except (ValueError, OverflowError):
-            raise ValueError(f"Поле «{label}» должно быть числом.") from None
-        if not math.isfinite(number) or number < 0:
-            raise ValueError(f"Поле «{label}» должно быть конечным неотрицательным числом.")
-        if field == "tax_percent" and number > 100:
-            raise ValueError("Налог должен быть в диапазоне от 0 до 100 %.")
-        if field == "employees":
-            if not number.is_integer() or number > 9007199254740991:
-                raise ValueError("Количество сотрудников должно быть целым числом от 0 до 9007199254740991.")
-            number = int(number)
-        company[field] = number
-    company["source"] = "manual"
-    return company
-
-
-def analyze_company(company):
-    # Демонстрационные правила: пороги не являются налоговыми нормативами.
-    signals = []
-    score = 0
-
-    def flag(label, reason, weight):
-        nonlocal score
-        signals.append({"column": label, "count": 1, "threshold": reason})
-        score += weight
-
-    if company["revenue"] > 0 and company["tax_percent"] < 3:
-        flag("Налог, %", "Положительная выручка при налоговой доле ниже 3 %.",
-             30 if company["tax_percent"] < 1 else 15)
-    if company["revenue"] > 0 and company["employees"] == 0:
-        flag("Количество сотрудников", "Есть выручка, но сотрудники не указаны (0).", 20)
-    if company["revenue"] == 0 and company["employees"] > 0:
-        flag("Доход / выручка", "При наличии сотрудников указана нулевая выручка.", 20)
-    if company["revenue"] == 0 and company["social_media"] == "высокая":
-        flag("Активность в соцсетях", "Высокая активность при нулевой выручке.", 12)
-    commerce = commerce_metadata(company.get("social_media"), company.get("revenue"))
-    if commerce["commerce_signal"]:
-        flag("Активность в соцсетях", commerce_reason(commerce["commerce_keywords"]), COMMERCE_BONUS)
-    statistics = {}
-    for field, label in (("revenue", "Доход / выручка"),
-                         ("tax_percent", "Налог, %"),
-                         ("employees", "Количество сотрудников")):
-        statistics[label] = dict.fromkeys(
-            ("mean", "median", "min", "max", "sum"), company[field]
-        )
-    return {
-        **commerce,
-        "rows": 1, "columns": 8,
-        "numeric_columns": ["revenue", "tax_percent", "employees"],
-        "missing_values": sum(company.get(field) is None for field in ("social_media", "region", "sector", "phone")),
-        "duplicates": 0, "anomalies": signals, "statistics": statistics,
-        "risk_score": min(100, score),
-        "note": "Демонстрационная оценка одной компании; сигналы не доказывают нарушение. Пороги не учитывают отрасль и налоговый режим.",
-    }
+    return {**normalize_company(data, require_name=True), "source": "manual"}
 
 
 @app.post("/api/manual-entry")
@@ -613,7 +527,7 @@ def manual_entry():
     try:
         analysis = analyze_company(company)
         company.update({key: analysis[key] for key in ("commerce_signal", "commerce_keywords")})
-        company_id = insert_company(company)
+        company_id = insert_company({**company, "scoring_version": SCORING_VERSION})
         report = generate_ai_report(normalize_report_input(analysis, company))
         recommendation = json.dumps(report["recommendation"], ensure_ascii=False) if isinstance(report, dict) else report
         update_company_score(company_id, analysis["risk_score"], recommendation)
@@ -645,24 +559,29 @@ def analyze():
 
     try:
         analysis = analyze_data(path)
-        # Только единственная строка может описывать одну компанию.
-        frame = load_dataframe(path)
-        company = frame.iloc[0].to_dict() if len(frame) == 1 else None
-        normalized = normalize_report_input(analysis, company)
-        report = generate_ai_report(normalized)
-        company_id = insert_company({**normalized["company"], "source": "upload",
-                                     "commerce_signal": analysis["commerce_signal"],
-                                     "commerce_keywords": analysis["commerce_keywords"]})
-        recommendation = json.dumps(report["recommendation"], ensure_ascii=False) if isinstance(report, dict) else report
-        update_company_score(company_id, analysis["risk_score"], recommendation)
-        return jsonify({
-            "success": True,
-            "company": get_company(company_id),
-            "analysis": analysis,
-            "ai_report": report
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        results = []
+        for record in analysis.pop("records"):
+            company, company_analysis = record["company"], record["analysis"]
+            report = generate_ai_report(normalize_report_input(company_analysis, company))
+            recommendation = json.dumps(report["recommendation"], ensure_ascii=False) if isinstance(report, dict) else report
+            results.append({**record, "ai_report": report, "company": {
+                **company, "source": "upload", "scoring_version": SCORING_VERSION,
+                "risk_score": company_analysis["risk_score"], "recommendation": recommendation,
+                "commerce_signal": company_analysis["commerce_signal"],
+                "commerce_keywords": company_analysis["commerce_keywords"],
+            }})
+        ids = insert_companies([item["company"] for item in results])
+        for item, company_id in zip(results, ids):
+            item["company"]["id"] = company_id
+        first = results[0]
+        return jsonify({"success": True, "results": results, "dataset_analysis": analysis,
+                        "company": first["company"] if len(results) == 1 else None,
+                        "analysis": first["analysis"] if len(results) == 1 else analysis,
+                        "ai_report": first["ai_report"] if len(results) == 1 else None})
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        return jsonify({"error": "Не удалось завершить анализ файла."}), 500
     finally:
         try:
             os.remove(path)
@@ -697,6 +616,7 @@ def download_report(company_id):
             "company_name": company["name"], "revenue": company["revenue"],
             "employees": company["employees"], "social_media": company["social_media"],
             "score": company["risk_score"], "recommendation": recommendation,
+            "scoring_version": company.get("scoring_version") or "legacy (прежняя методика)",
         }
         builder, mimetype = formats[file_format]
         content = builder(record)
@@ -724,7 +644,7 @@ def company_graph():
                 "target": pair["target"]["id"],
                 "reason": pair["reason"],
             })
-        response = jsonify({"nodes": list(nodes.values()), "edges": edges})
+        response = jsonify({"nodes": list(nodes.values()), "edges": edges, "risk_bands": RISK_BANDS})
         response.headers["Cache-Control"] = "no-store"
         return response
     except Exception:
